@@ -15,8 +15,8 @@ tickers = ["005930.KS", "000660.KS", "035420.KS", "035720.KS", "005380.KS", "068
 
 def analyze_stock(ticker):
     try:
-        data = yf.download(ticker, period="60d", interval="1d", progress=False)
-        if len(data) < 20: return None
+        stock = yf.Ticker(ticker)
+data = stock.history(period="60d")
         
         # 단순 이동평균선(SMA) 직접 계산 (pandas_ta 미사용)
         data['SMA20'] = data['Close'].rolling(window=20).mean()
