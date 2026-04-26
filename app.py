@@ -111,3 +111,4 @@ with col_right:
 if st.button("🔄 실시간 데이터 새로고침"):
     st.cache_data.clear()
     st.rerun()
+g
