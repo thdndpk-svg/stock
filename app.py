@@ -2,131 +2,116 @@ import streamlit as st
 import FinanceDataReader as fdr
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import requests
 from bs4 import BeautifulSoup
 
-# 1. 페이지 설정 및 디자인
-st.set_page_config(page_title="K-Stock Intelligence Pro", layout="wide")
+# 1. 페이지 설정
+st.set_page_config(page_title="K-Stock Intelligence Terminal", layout="wide")
 
+# 2. 고해상도 다크 UI 스타일링
 st.markdown("""
     <style>
-    .stMetric { border: 1px solid #374151; padding: 10px; border-radius: 8px; background: #111827; }
-    .stTabs [data-baseweb="tab-list"] { gap: 10px; }
-    .stTabs [data-baseweb="tab"] { background-color: #1f2937; border-radius: 5px; padding: 10px; color: white; }
+    .stButton>button { width: 100%; border-radius: 5px; height: 3.5em; background-color: #262730; color: #ff4b4b; border: 1px solid #ff4b4b; font-weight: bold; margin-bottom: 10px; }
+    .stButton>button:hover { background-color: #ff4b4b; color: white; }
+    .status-box { background-color: #111827; padding: 20px; border-radius: 10px; border-left: 5px solid #ff4b4b; }
+    .news-card { padding: 10px; border-bottom: 1px solid #374151; font-size: 14px; }
     </style>
     """, unsafe_allow_html=True)
 
-# 2. 데이터 엔진
+# 3. 데이터 및 뉴스 로드 함수
 @st.cache_data(ttl=600)
-def get_stock_data():
-    df = fdr.StockListing('KRX')
-    # 에러 방지: 존재하는 컬럼명만 사용하도록 정제
-    return df
+def get_krx(): return fdr.StockListing('KRX')
 
-df_krx = get_stock_data()
-
-# 3. 뉴스 크롤링 함수
-def get_realtime_news():
-    news_list = []
+def get_news():
+    news = []
     try:
-        url = "https://finance.naver.com/news/mainnews.naver"
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+        res = requests.get("https://finance.naver.com/news/mainnews.naver", headers={'User-Agent':'Mozilla/5.0'})
         soup = BeautifulSoup(res.text, 'html.parser')
-        items = soup.select('.mainNewsList .articleSubject a')
-        for item in items[:8]:
-            news_list.append({"title": item.get_text().strip(), "link": "https://finance.naver.com" + item['href']})
-    except:
-        news_list.append({"title": "뉴스를 불러올 수 없습니다.", "link": "#"})
-    return news_list
+        for item in soup.select('.mainNewsList .articleSubject a')[:6]:
+            news.append({"title": item.get_text().strip(), "link": "https://finance.naver.com"+item['href']})
+    except: news = [{"title": "뉴스 정보를 가져올 수 없습니다.", "link": "#"}]
+    return news
 
-# --- 메인 대시보드 ---
-st.title("🛡️ K-Stock 실전 투자 전용 시스템")
+df_krx = get_krx()
 
-# 상단 지수 전광판
-m_cols = st.columns(5)
-indices = {"KOSPI": "KS11", "KOSDAQ": "KQ11", "나스닥": "IXIC", "S&P500": "US500", "환율": "USD/KRW"}
-for i, (name, code) in enumerate(indices.items()):
-    try:
-        idx_df = fdr.DataReader(code).tail(2)
-        curr = idx_df['Close'].iloc[-1]
-        prev = idx_df['Close'].iloc[-2]
-        m_cols[i].metric(name, f"{curr:,.2f}", f"{curr-prev:+.2f}")
-    except: pass
-
-st.divider()
-
-main_tabs = st.tabs(["📊 실시간 수급/거래량", "🎯 기법별 종목포착", "🗞️ 마켓 이슈"])
-
-# [Tab 1] 실시간 수급 및 거래량 (에러 수정 완료)
-with main_tabs[0]:
-    c1, c2, c3 = st.columns(3)
+# --- 사이드바: 기법 선택 및 정보 센터 ---
+with st.sidebar:
+    st.title("🛠️ 분석 센터")
+    st.subheader("📊 기법별 즉시 스캔")
     
-    with c1:
-        st.markdown("#### 🔥 실시간 거래대금 상위")
-        # 컬럼명이 다를 수 있으므로 안전하게 처리
-        sort_col = 'Marcap' if 'Marcap' in df_krx.columns else df_krx.columns[0]
-        top_trade = df_krx.nlargest(15, sort_col)
-        # 안전한 컬럼만 출력 (Name, Code 등)
-        st.dataframe(top_trade[['Name', 'Code', 'Market']], hide_index=True, use_container_width=True)
-
-    with c2:
-        st.markdown("#### 🏦 외국인/기관 매수 추정")
-        # 등락률(Chg)이 높은 종목을 수급 유입으로 간주 (실전 기법)
-        if 'Chg' in df_krx.columns:
-            top_up = df_krx.nlargest(15, 'Chg')
-            st.dataframe(top_up[['Name', 'Code', 'Chg']], hide_index=True, use_container_width=True)
-
-    with c3:
-        st.markdown("#### 🏗️ 연기금/국민연금 선호주")
-        pension_style = df_krx[df_krx['Market'] == 'KOSPI'].head(15)
-        st.dataframe(pension_style[['Name', 'Code']], hide_index=True, use_container_width=True)
-
-# [Tab 2] 기법별 종목 포착 (로직 고도화)
-with main_tabs[1]:
-    col_set, col_res = st.columns([1, 3])
-    with col_set:
-        strategy = st.radio("전략 선택", ["60월선 바닥매집(족보집)", "N자형 눌림목", "거래량 폭증"])
-        scan_btn = st.button("🚀 기법 스캔 시작")
+    # 각각의 버튼으로 기법 배치
+    btn_jokbo = st.button("💎 족보집: 60월선 바닥매집")
+    btn_nshape = st.button("🎯 전문가: N자형 눌림목")
+    btn_vol = st.button("🔥 세력: 거래량 폭증")
+    btn_top = st.button("🏦 외인/기관 수급상위")
     
-    with col_res:
-        if scan_btn:
-            results = []
-            p_bar = st.progress(0)
-            status = st.empty()
-            targets = df_krx.head(100) # 성능을 위해 우선 100개
-            
-            for i, row in targets.iterrows():
-                status.text(f"🔍 분석 중: {row['Name']}")
-                try:
-                    if strategy == "60월선 바닥매집(족보집)":
-                        df_m = fdr.DataReader(row['Code'], interval='monthly').tail(65)
-                        df_m['MA60'] = df_m['Close'].rolling(60).mean()
-                        if df_m['Close'].iloc[-1] >= df_m['MA60'].iloc[-1] and df_m['Close'].iloc[-2] < df_m['MA60'].iloc[-2]:
-                            results.append((row['Name'], row['Code'], df_m, "60월선 골든크로스"))
-                    
-                    elif strategy == "N자형 눌림목":
-                        df_d = fdr.DataReader(row['Code']).tail(30)
-                        ma20 = df_d['Close'].rolling(20).mean()
-                        if df_d['Close'].iloc[-2] > ma20.iloc[-2] and df_d['Low'].iloc[-1] <= ma20.iloc[-1] and df_d['Close'].iloc[-1] > ma20.iloc[-1]:
-                            results.append((row['Name'], row['Code'], df_d, "20일선 지지 눌림목"))
-                except: pass
-                p_bar.progress((i+1)/len(targets))
-            
-            status.empty()
-            p_bar.empty()
-            
-            if results:
-                for n, c, d, r in results:
-                    with st.expander(f"⭐ {n} ({c}) - {r}"):
-                        st.line_chart(d['Close'])
-            else:
-                st.warning("현재 시장에 해당되는 종목이 없습니다.")
+    st.divider()
+    st.subheader("🌍 시장 지표")
+    for name, code in [("KOSPI", "KS11"), ("KOSDAQ", "KQ11"), ("나스닥", "IXIC")]:
+        try:
+            d = fdr.DataReader(code).tail(2)
+            st.metric(name, f"{d['Close'].iloc[-1]:,.2f}", f"{d['Close'].iloc[-1]-d['Close'].iloc[-2]:+.2f}")
+        except: pass
 
-# [Tab 3] 마켓 이슈
-with main_tabs[2]:
-    st.subheader("📰 실시간 주요 뉴스 및 정부 정책")
-    news_data = get_realtime_news()
-    for n in news_data:
-        st.markdown(f"📍 [{n['title']}]({n['link']})")
+# --- 메인 화면: 실시간 이슈 및 결과창 ---
+col_issue, col_main = st.columns([1, 2.5])
+
+with col_issue:
+    st.subheader("📰 실시간 마켓 이슈")
+    all_news = get_news()
+    for n in all_news:
+        st.markdown(f"<div class='news-card'>📍 <a href='{n['link']}' style='color:white;text-decoration:none;'>{n['title']}</a></div>", unsafe_allow_html=True)
+    
+    st.divider()
+    st.subheader("📊 실시간 거래대금 상위")
+    st.dataframe(df_krx.nlargest(10, 'Marcap')[['Name', 'Code']], hide_index=True)
+
+with col_main:
+    # 어떤 버튼을 눌렀느냐에 따라 분석 시작
+    active_strategy = None
+    if btn_jokbo: active_strategy = "족보집"
+    if btn_nshape: active_strategy = "눌림목"
+    if btn_vol: active_strategy = "거래량"
+    if btn_top: active_strategy = "수급"
+
+    if active_strategy:
+        st.subheader(f"🚀 {active_strategy} 분석 엔진 가동 중...")
+        status_area = st.empty()
+        progress_bar = st.progress(0)
+        result_area = st.container()
+        
+        results = []
+        targets = df_krx.head(150) # 스캔 속도와 정확도 사이의 최적값
+        
+        for i, row in targets.iterrows():
+            status_area.markdown(f"<div class='status-box'>🔍 분석 중: <b>{row['Name']}</b> ({row['Code']})</div>", unsafe_allow_html=True)
+            try:
+                if active_strategy == "족보집":
+                    df_m = fdr.DataReader(row['Code'], interval='monthly').tail(65)
+                    df_m['MA60'] = df_m['Close'].rolling(60).mean()
+                    if df_m['Close'].iloc[-1] >= df_m['MA60'].iloc[-1] and df_m['Close'].iloc[-2] < df_m['MA60'].iloc[-2]:
+                        results.append((row['Name'], row['Code'], df_m, "60월선 골든크로스"))
+                
+                elif active_strategy == "눌림목":
+                    df_d = fdr.DataReader(row['Code']).tail(40)
+                    ma20 = df_d['Close'].rolling(20).mean()
+                    if df_d['Close'].iloc[-2] > ma20.iloc[-2] and df_d['Low'].iloc[-1] <= ma20.iloc[-1] and df_d['Close'].iloc[-1] > ma20.iloc[-1]:
+                        results.append((row['Name'], row['Code'], df_d, "20일선 지지"))
+            except: pass
+            progress_bar.progress((i+1)/len(targets))
+        
+        status_area.empty()
+        progress_bar.empty()
+        
+        if results:
+            st.success(f"✅ 총 {len(results)}개의 종목을 포착했습니다!")
+            for n, c, d, r in results:
+                with st.expander(f"⭐ {n} ({c}) - {r}"):
+                    fig = go.Figure(data=[go.Candlestick(x=d.index, open=d['Open'], high=d['High'], low=d['Low'], close=d['Close'])])
+                    fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=300, margin=dict(l=0,r=0,t=0,b=0))
+                    st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("조건에 맞는 종목이 현재 시장에 없습니다.")
+    else:
+        st.info("👈 왼쪽 분석 센터에서 기법 버튼을 눌러 스캔을 시작하세요.")
