@@ -4,78 +4,78 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="K-주식 급등주 탐색기", layout="wide")
+st.set_page_config(page_title="K-Stock 매집주 탐색기", layout="wide")
 
-st.title("🇰🇷 한국 시장 실시간 급등주 탐색기")
-st.write("네이버 금융 데이터를 분석하여 현재 시장에서 가장 뜨거운 종목을 찾아냅니다.")
+st.title("🚀 실전 주식: 바닥 매집주 & 60월선 돌파 시스템")
 
-# 1. 한국 시장 전체 종목 리스트 가져오기 (KOSPI, KOSDAQ)
-@st.cache_data(ttl=3600) # 1시간마다 리스트 갱신
-def get_stock_list():
-    df_krx = fdr.StockListing('KRX') # 코스피, 코스닥, 코넥스 통합
-    return df_krx[['Code', 'Name', 'Market']]
+# 탭 구성
+tab1, tab2, tab3 = st.tabs(["💎 바닥 매집주 포착", "📈 실시간 급등주", "🔍 종목 검색"])
 
-def analyze_stock(code, name):
+@st.cache_data(ttl=3600)
+def get_krx_list():
+    return fdr.StockListing('KRX')
+
+df_krx = get_krx_list()
+
+# --- 기법 적용 함수 ---
+def analyze_bottom_accumulation(code, name):
     try:
-        # 최근 40일치 데이터 (주말 제외 약 2달치)
-        df = fdr.DataReader(code, (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d'))
-        if len(df) < 20: return None
+        # 월봉 데이터를 위해 충분한 기간(약 10년) 호출
+        df_month = fdr.DataReader(code, '2015-01-01', interval='monthly')
+        if len(df_month) < 60: return None
         
-        current_price = df['Close'].iloc[-1]
-        prev_price = df['Close'].iloc[-2]
-        change_pct = ((current_price - prev_price) / prev_price) * 100
+        # 60월 이동평균선 계산
+        df_month['MA60'] = df_month['Close'].rolling(window=60).mean()
         
-        # 기술적 지표 계산 (이동평균선, RSI)
-        ma20 = df['Close'].rolling(window=20).mean().iloc[-1]
+        curr = df_month.iloc[-1]  # 현재 월
+        prev = df_month.iloc[-2]  # 직전 월
         
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        current_rsi = rsi.iloc[-1]
-
-        # 급등주 필터링 조건: 오늘 3% 이상 상승 중이며 이평선 정배열
-        if change_pct > 3 and current_price > ma20:
+        # 기법 조건 1: 주가가 60월선 근처에 있거나 막 돌파했는가?
+        is_breakout = prev['Close'] < prev['MA60'] and curr['Close'] >= curr['MA60']
+        is_on_line = abs(curr['Close'] - curr['MA60']) / curr['MA60'] < 0.05 # 60월선과 5% 이내 인접
+        
+        # 기법 조건 2: 바닥권 확인 (최근 1년 최고점 대비 많이 하락해 있는가?)
+        high_1y = df_month['High'].tail(12).max()
+        is_bottom = curr['Close'] < high_1y * 0.7 # 고점 대비 30% 이상 하락 상태
+        
+        if (is_breakout or is_on_line) and is_bottom:
             return {
-                "name": name, "code": code, "price": current_price,
-                "change": change_pct, "rsi": current_rsi, "df": df
+                "name": name, "code": code, "price": curr['Close'],
+                "ma60": curr['MA60'], "df": df_month,
+                "type": "골든크로스 돌파" if is_breakout else "60월선 지지/매집"
             }
-    except:
-        return None
+    except: return None
 
-if st.button("🔍 실시간 시장 스캔 (상위 종목 분석)"):
-    stock_list = get_stock_list()
-    # 너무 많으면 느려지므로 시가총액 상위나 거래량 상위 느낌으로 100개 정도만 우선 스캔
-    target_stocks = stock_list.head(150) 
+# --- Tab 1: 바닥 매집주 포착 ---
+with tab1:
+    st.header("📂 족보집 기법: 60월선 바닥 매집주")
+    st.info("5년 평균선(60월선)을 돌파하거나 안착하며 에너지를 모으는 종목을 찾습니다.")
     
-    results = []
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+    if st.button("바닥 매집주 스캔 시작"):
+        targets = df_krx.head(300) # 상위 300개 우선 스캔
+        found_stocks = []
+        prog = st.progress(0)
+        
+        for i, row in targets.iterrows():
+            res = analyze_bottom_accumulation(row['Code'], row['Name'])
+            if res: found_stocks.append(res)
+            prog.progress((i+1)/len(targets))
+            
+        if not found_stocks:
+            st.warning("현재 기법에 부합하는 바닥 매집주가 없습니다.")
+        else:
+            for s in found_stocks:
+                with st.expander(f"💎 {s['name']} ({s['code']}) - {s['type']}"):
+                    st.write(f"현재가: {s['price']:,}원 | 60월선 위치: {s['ma60']:,.0f}원")
+                    
+                    # 월봉 차트 시각화
+                    fig = go.Figure()
+                    fig.add_trace(go.Candlestick(x=s['df'].index, open=s['df']['Open'], 
+                                               high=s['df']['High'], low=s['df']['Low'], 
+                                               close=s['df']['Close'], name="월봉"))
+                    fig.add_trace(go.Scatter(x=s['df'].index, y=s['df']['MA60'], 
+                                           line=dict(color='red', width=2), name="60월선"))
+                    fig.update_layout(title=f"{s['name']} 월봉 차트 (60월선 포함)", xaxis_rangeslider_visible=False)
+                    st.plotly_chart(fig, use_container_width=True)
 
-    for i, row in target_stocks.iterrows():
-        status_text.text(f"분석 중: {row['Name']}")
-        res = analyze_stock(row['Code'], row['Name'])
-        if res:
-            results.append(res)
-        progress_bar.progress((i + 1) / len(target_stocks))
-    
-    status_text.text("분석 완료!")
-    
-    if not results:
-        st.warning("현재 조건에 맞는 급등 종목이 없습니다.")
-    else:
-        st.success(f"오늘의 급등 유망주 {len(results)}개를 찾았습니다!")
-        for res in results:
-            with st.expander(f"🚩 {res['name']} ({res['code']}) - 현재 {res['change']:.2f}% 상승 중"):
-                col1, col2 = st.columns(2)
-                col1.metric("현재가", f"{res['price']:,}원", f"{res['change']:.2f}%")
-                col2.metric("RSI(심리도)", f"{res['rsi']:.1f}")
-                
-                fig = go.Figure(data=[go.Candlestick(
-                    x=res['df'].index,
-                    open=res['df']['Open'], high=res['df']['High'],
-                    low=res['df']['Low'], close=res['df']['Close']
-                )])
-                fig.update_layout(xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
-                st.plotly_chart(fig, use_container_width=True)
+# (기존 Tab 2, Tab 3 코드는 유지하거나 필요에 따라 통합 가능)
