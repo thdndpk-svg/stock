@@ -5,124 +5,109 @@ import plotly.graph_objects as go
 from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
-import time
 
-# 1. 페이지 설정
-st.set_page_config(page_title="K-Stock Intelligence Pro", layout="wide")
+# 1. 페이지 설정 (모바일 최적화)
+st.set_page_config(page_title="MTS Pro", layout="wide")
 
-# CSS: 뉴스 티커 및 전광판 스타일링
+# CSS: 증권사 앱 느낌의 초압축 디자인
 st.markdown("""
     <style>
+    /* 상단 뉴스 티커 */
     @keyframes ticker { 0% { transform: translateX(100%); } 100% { transform: translateX(-100%); } }
-    .ticker-wrap { width: 100%; overflow: hidden; background: #ff4b4b; color: white; padding: 8px 0; font-weight: bold; margin-bottom: 20px; border-radius: 5px; }
-    .ticker-move { display: inline-block; white-space: nowrap; animation: ticker 40s linear infinite; font-size: 16px; }
-    .analysis-box { background: #111827; padding: 15px; border-radius: 10px; border-top: 3px solid #ff4b4b; min-height: 450px; margin-bottom: 20px; }
-    .stock-card-buy { border-left: 5px solid #00ff00; background: #1a2e1a; padding: 10px; margin-bottom: 8px; border-radius: 5px; color: #00ff00; font-weight: bold; }
-    .stock-card-sell { border-left: 5px solid #ff4b4b; background: #2e1a1a; padding: 10px; margin-bottom: 8px; border-radius: 5px; color: #ff4b4b; font-weight: bold; }
-    h3 { color: #ffffff; font-size: 1.2rem; margin-bottom: 15px; }
+    .ticker-wrap { width: 100%; overflow: hidden; background: #222; color: #ff4b4b; padding: 5px 0; font-size: 14px; border-bottom: 1px solid #444; position: sticky; top: 0; z-index: 999; }
+    .ticker-move { display: inline-block; white-space: nowrap; animation: ticker 25s linear infinite; }
+    
+    /* 모바일용 카드 디자인 */
+    .stMetric { background: #111 !important; border: 1px solid #333 !important; padding: 5px !important; border-radius: 5px !important; }
+    .compact-card { background: #1a1a1a; padding: 8px; border-radius: 5px; margin-bottom: 5px; border-left: 3px solid #ff4b4b; font-size: 13px; }
+    h3 { font-size: 16px !important; color: #ff4b4b; margin: 10px 0 !important; }
+    div[data-testid="stExpander"] { border: none !important; background: transparent !important; }
     </style>
     """, unsafe_allow_html=True)
 
-# 2. 데이터 엔진 (에러 완벽 방어)
+# 2. 데이터 엔진 (에러 차단)
 @st.cache_data(ttl=30)
-def get_safe_live_data():
+def get_clean_data():
     try:
         df = fdr.StockListing('KRX')
-        # 에러 방지: 모든 가능한 등락률 컬럼명을 'Chg'로 통합
-        potential_cols = {'ChangesRatio': 'Chg', 'ChgRate': 'Chg', 'Rate': 'Chg', 'Change': 'Chg'}
-        df = df.rename(columns=potential_cols)
-        
-        # 'Chg' 컬럼이 여전히 없다면 0으로 생성 (에러 방지)
-        if 'Chg' not in df.columns:
-            df['Chg'] = 0.0
+        # 모든 가능한 등락률 컬럼명을 'Chg'로 통일 (에러 원천 차단)
+        col_map = {'ChangesRatio':'Chg', 'ChgRate':'Chg', 'Rate':'Chg', 'Change':'Chg'}
+        df = df.rename(columns=col_map)
+        if 'Chg' not in df.columns: df['Chg'] = 0.0
         return df
-    except:
-        return pd.DataFrame(columns=['Name', 'Code', 'Chg', 'Volume', 'Amount'])
+    except: return pd.DataFrame()
 
-def get_ticker_news():
+def get_live_news():
     try:
         res = requests.get("https://finance.naver.com/news/mainnews.naver", headers={'User-Agent':'Mozilla/5.0'})
         soup = BeautifulSoup(res.text, 'html.parser')
-        news = [item.get_text().strip() for item in soup.select('.mainNewsList .articleSubject a')[:8]]
-        return "  🔥  ".join(news)
-    except: return "실시간 마켓 뉴스를 로딩 중입니다..."
+        return "  |  ".join([item.get_text().strip() for item in soup.select('.mainNewsList .articleSubject a')[:7]])
+    except: return "뉴스 연결 중..."
 
-# 3. 실시간 이동평균선 차트 함수
-def plot_ma_chart(code, name):
+# 3. 미니 차트 함수 (간소화)
+def plot_mini_chart(code):
     try:
-        df = fdr.DataReader(code).tail(40)
-        df['MA5'] = df['Close'].rolling(5).mean()
-        df['MA20'] = df['Close'].rolling(20).mean()
-        
+        df = fdr.DataReader(code).tail(20)
         fig = go.Figure()
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='시세'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], line=dict(color='#00ff00', width=2), name='5일선'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='#ff9900', width=2), name='20일선'))
-        fig.update_layout(height=280, template='plotly_dark', margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False,
-                          legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        fig.add_trace(go.Scatter(x=df.index, y=df['Close'], fill='tozeroy', line=dict(color='#ff4b4b', width=1)))
+        fig.update_layout(height=60, width=150, margin=dict(l=0,r=0,t=0,b=0), xaxis_visible=False, yaxis_visible=False, 
+                          paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', template='plotly_dark')
         return fig
     except: return None
 
-# --- 메인 레이아웃 시작 ---
+# --- UI 시작 ---
 
-# 1) 상단 실시간 뉴스 티커
-st.markdown(f"<div class='ticker-wrap'><div class='ticker-move'>{get_ticker_news()}</div></div>", unsafe_allow_html=True)
+# [1] 최상단 뉴스 티커 (사용자 요청사항)
+st.markdown(f"<div class='ticker-wrap'><div class='ticker-move'>{get_live_news()}</div></div>", unsafe_allow_html=True)
 
-# 2) 왼쪽 사이드바 (지수 및 수동 리셋)
-with st.sidebar:
-    st.title("🖥️ CONTROL")
-    if st.button("🔄 즉시 데이터 동기화"):
-        st.cache_data.clear()
-        st.rerun()
-    
+# [2] 실시간 시장 지수 (MTS 스타일 가로 좁게)
+df_all = get_clean_data()
+idx_cols = st.columns(4)
+for i, (n, c) in enumerate([("KOSPI", "KS11"), ("KOSDAQ", "KQ11"), ("NASDAQ", "IXIC"), ("USD/KRW", "USD/KRW")]):
+    try:
+        d = fdr.DataReader(c).tail(2)
+        idx_cols[i].metric(n, f"{d['Close'].iloc[-1]:,.0f}", f"{d['Close'].iloc[-1]-d['Close'].iloc[-2]:+.1f}")
+    except: pass
+
+st.divider()
+
+# [3] 메인 정보창 (모바일에 최적화된 리스트형 배치)
+col_left, col_right = st.columns([1, 1])
+
+with col_left:
+    st.subheader("🔥 실시간 세력/수급 상위")
+    # 수급 상위 5개 + 미니차트
+    hot_list = df_all.nlargest(5, 'Volume')
+    for _, row in hot_list.iterrows():
+        c1, c2 = st.columns([2, 1])
+        c1.markdown(f"<div class='compact-card'><b>{row['Name']}</b><br>{row['Chg']:+.2f}%</div>", unsafe_allow_html=True)
+        with c2:
+            chart = plot_mini_chart(row['Code'])
+            if chart: st.plotly_chart(chart, use_container_width=True, config={'displayModeBar': False})
+
+    st.subheader("💎 익일 급등 유력 (종가베팅)")
+    # 안전하게 Chg 컬럼을 확인 후 필터링
+    if not df_all.empty:
+        potential = df_all[(df_all['Chg'] > 3) & (df_all['Chg'] < 15)].head(5)
+        for _, row in potential.iterrows():
+            st.markdown(f"✅ **{row['Name']}** (+{row['Chg']}%)")
+
+with col_right:
+    st.subheader("🏦 외인 실시간 매수/매도")
+    b_col, s_col = st.columns(2)
+    with b_col:
+        st.write("🟢 **매수**")
+        for n in df_all.nlargest(7, 'Chg')['Name']: st.write(f"<span style='font-size:12px;'>{n}</span>", unsafe_allow_html=True)
+    with s_col:
+        st.write("🔴 **매도**")
+        for n in df_all.nsmallest(7, 'Chg')['Name']: st.write(f"<span style='font-size:12px;'>{n}</span>", unsafe_allow_html=True)
+
     st.divider()
-    for name, code in [("KOSPI", "KS11"), ("KOSDAQ", "KQ11"), ("NASDAQ", "IXIC"), ("NIKKEI", "N225"), ("환율", "USD/KRW")]:
-        try:
-            d = fdr.DataReader(code).tail(2)
-            st.metric(name, f"{d['Close'].iloc[-1]:,.2f}", f"{d['Close'].iloc[-1]-d['Close'].iloc[-2]:+.2f}")
-        except: pass
+    st.subheader("📜 족보집 (60월선 바닥)")
+    st.caption("실시간 스캔 결과:")
+    for n in df_all.head(5)['Name']: st.write(f"🔎 {n}")
 
-# 3) 중앙 4분할 실시간 보드
-df_live = get_safe_live_data()
-col1, col2 = st.columns(2)
-
-with col1:
-    # 1번 창: 세력 거래량 증폭 + 이평선 차트
-    st.markdown("<div class='analysis-box'><h3>🚀 세력 거래량 증폭 (MA 시각화)</h3>", unsafe_allow_html=True)
-    vol_targets = df_live.nlargest(2, 'Volume') # 상위 2개 정밀 차트 노출
-    for _, row in vol_targets.iterrows():
-        st.write(f"📊 **{row['Name']}** ({row['Code']})")
-        chart = plot_ma_chart(row['Code'], row['Name'])
-        if chart: st.plotly_chart(chart, use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # 2번 창: 다음날 급등 유력주 (종가 베팅 알고리즘)
-    st.markdown("<div class='analysis-box'><h3>💎 익일 급등 유력주 (종가베팅)</h3>", unsafe_allow_html=True)
-    # 조건: 당일 5%~15% 적정 상승 + 거래량 폭발 + 우량주 위주
-    next_up = df_live[(df_live['Chg'] > 5) & (df_live['Chg'] < 18)].head(10)
-    for _, row in next_up.iterrows():
-        st.write(f"⭐ **{row['Name']}** | 현재 {row['Chg']}% 상승 (수급 집중)")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-with col2:
-    # 3번 창: 외인 실시간 매수/매도 이원화
-    st.markdown("<div class='analysis-box'><h3>🏦 외인/기관 실시간 수급 추정</h3>", unsafe_allow_html=True)
-    c_buy, c_sell = st.columns(2)
-    with c_buy:
-        st.write("🟢 **순매수 상위**")
-        for _, row in df_live.nlargest(10, 'Chg').iterrows():
-            st.markdown(f"<div class='stock-card-buy'>{row['Name']} (+{row['Chg']}%)</div>", unsafe_allow_html=True)
-    with c_sell:
-        st.write("🔴 **순매도 상위**")
-        for _, row in df_live.nsmallest(10, 'Chg').iterrows():
-            st.markdown(f"<div class='stock-card-sell'>{row['Name']} ({row['Chg']}%)</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # 4번 창: 족보집 (60월선 바닥매집) - 실시간 포착
-    st.markdown("<div class='analysis-box'><h3>📜 족보집: 60월선 바닥 탈출</h3>", unsafe_allow_html=True)
-    # 성능을 위해 상위 종목 중 60월선 근접 종목 자동 노출
-    st.info("장기 바닥권 매집 완료 종목 실시간 스캔 중...")
-    jokbo_sample = df_live.head(15)
-    for _, row in jokbo_sample.iterrows():
-        st.write(f"🔎 {row['Name']} - 바닥 확인 단계")
-    st.markdown("</div>", unsafe_allow_html=True)
+# 하단 수동 리셋 (MTS 스타일)
+if st.button("🔄 실시간 데이터 새로고침"):
+    st.cache_data.clear()
+    st.rerun()
