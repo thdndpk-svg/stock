@@ -1,64 +1,81 @@
 import streamlit as st
-import yfinance as yf
+import FinanceDataReader as fdr
 import pandas as pd
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta
 
-# 페이지 설정
-st.set_page_config(page_title="내일의 급등주 TOP 5", layout="wide")
+st.set_page_config(page_title="K-주식 급등주 탐색기", layout="wide")
 
-st.title("🚀 내일의 급등주 예측기 (v2.1)")
-st.write("데이터 제한 에러를 방지하도록 설계된 버전입니다.")
+st.title("🇰🇷 한국 시장 실시간 급등주 탐색기")
+st.write("네이버 금융 데이터를 분석하여 현재 시장에서 가장 뜨거운 종목을 찾아냅니다.")
 
-# 분석 대상 종목 (KOSPI 주요 종목)
-tickers = ["005930.KS", "000660.KS", "035420.KS", "035720.KS", "005380.KS", "068270.KS", "005490.KS", "000270.KS"]
+# 1. 한국 시장 전체 종목 리스트 가져오기 (KOSPI, KOSDAQ)
+@st.cache_data(ttl=3600) # 1시간마다 리스트 갱신
+def get_stock_list():
+    df_krx = fdr.StockListing('KRX') # 코스피, 코스닥, 코넥스 통합
+    return df_krx[['Code', 'Name', 'Market']]
 
-def analyze_stock(ticker):
+def analyze_stock(code, name):
     try:
-        # 야후 파이낸스 데이터 호출 방식 변경
-        stock = yf.Ticker(ticker)
-        data = stock.history(period="60d")
+        # 최근 40일치 데이터 (주말 제외 약 2달치)
+        df = fdr.DataReader(code, (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d'))
+        if len(df) < 20: return None
         
-        if data.empty or len(data) < 20:
-            return None
+        current_price = df['Close'].iloc[-1]
+        prev_price = df['Close'].iloc[-2]
+        change_pct = ((current_price - prev_price) / prev_price) * 100
         
-        # 이동평균선 및 RSI 직접 계산
-        data['SMA20'] = data['Close'].rolling(window=20).mean()
-        delta = data['Close'].diff()
+        # 기술적 지표 계산 (이동평균선, RSI)
+        ma20 = df['Close'].rolling(window=20).mean().iloc[-1]
+        
+        delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
-        data['RSI'] = 100 - (100 / (1 + rs))
-        
-        current_price = data['Close'].iloc[-1]
-        current_rsi = data['RSI'].iloc[-1]
-        sma_20 = data['SMA20'].iloc[-1]
-        
-        score = 0
-        if current_rsi < 45: score += 50  # 과매도 구간 근접
-        if current_price > sma_20: score += 50  # 상승 추세
-        
-        return {"ticker": ticker, "price": current_price, "rsi": current_rsi, "score": score, "data": data}
-    except Exception as e:
-        # 에러 발생 시 건너뛰기
+        rsi = 100 - (100 / (1 + rs))
+        current_rsi = rsi.iloc[-1]
+
+        # 급등주 필터링 조건: 오늘 3% 이상 상승 중이며 이평선 정배열
+        if change_pct > 3 and current_price > ma20:
+            return {
+                "name": name, "code": code, "price": current_price,
+                "change": change_pct, "rsi": current_rsi, "df": df
+            }
+    except:
         return None
 
-if st.button("📈 지금 분석 시작"):
+if st.button("🔍 실시간 시장 스캔 (상위 종목 분석)"):
+    stock_list = get_stock_list()
+    # 너무 많으면 느려지므로 시가총액 상위나 거래량 상위 느낌으로 100개 정도만 우선 스캔
+    target_stocks = stock_list.head(150) 
+    
     results = []
-    with st.spinner('종목별 데이터를 불러오는 중...'):
-        for t in tickers:
-            res = analyze_stock(t)
-            if res:
-                results.append(res)
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    for i, row in target_stocks.iterrows():
+        status_text.text(f"분석 중: {row['Name']}")
+        res = analyze_stock(row['Code'], row['Name'])
+        if res:
+            results.append(res)
+        progress_bar.progress((i + 1) / len(target_stocks))
+    
+    status_text.text("분석 완료!")
     
     if not results:
-        st.error("현재 야후 파이낸스 서버 연결이 원활하지 않습니다. 잠시 후 다시 시도해 주세요!")
+        st.warning("현재 조건에 맞는 급등 종목이 없습니다.")
     else:
-        results = sorted(results, key=lambda x: x['score'], reverse=True)[:5]
+        st.success(f"오늘의 급등 유망주 {len(results)}개를 찾았습니다!")
         for res in results:
-            with st.expander(f"📌 종목: {res['ticker']} (예측 점수: {res['score']}점)"):
-                st.write(f"현재가: {res['price']:.0f}원 | RSI 지수: {res['rsi']:.1f}")
-                fig = go.Figure(data=[go.Candlestick(x=res['data'].index,
-                                open=res['data']['Open'], high=res['data']['High'],
-                                low=res['data']['Low'], close=res['data']['Close'])])
-                st.plotly_chart(fig)
+            with st.expander(f"🚩 {res['name']} ({res['code']}) - 현재 {res['change']:.2f}% 상승 중"):
+                col1, col2 = st.columns(2)
+                col1.metric("현재가", f"{res['price']:,}원", f"{res['change']:.2f}%")
+                col2.metric("RSI(심리도)", f"{res['rsi']:.1f}")
+                
+                fig = go.Figure(data=[go.Candlestick(
+                    x=res['df'].index,
+                    open=res['df']['Open'], high=res['df']['High'],
+                    low=res['df']['Low'], close=res['df']['Close']
+                )])
+                fig.update_layout(xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
+                st.plotly_chart(fig, use_container_width=True)
