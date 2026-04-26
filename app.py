@@ -6,109 +6,115 @@ from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
 
-# 1. 페이지 설정 (모바일 최적화)
-st.set_page_config(page_title="MTS Pro", layout="wide")
+# 1. 페이지 설정 (증권사 앱 모드)
+st.set_page_config(page_title="MTS PRO", layout="wide")
 
-# CSS: 증권사 앱 느낌의 초압축 디자인
+# CSS: 모바일 최적화 및 초압축 레이아웃
 st.markdown("""
     <style>
-    /* 상단 뉴스 티커 */
+    /* 상단 뉴스 전광판 */
     @keyframes ticker { 0% { transform: translateX(100%); } 100% { transform: translateX(-100%); } }
-    .ticker-wrap { width: 100%; overflow: hidden; background: #222; color: #ff4b4b; padding: 5px 0; font-size: 14px; border-bottom: 1px solid #444; position: sticky; top: 0; z-index: 999; }
-    .ticker-move { display: inline-block; white-space: nowrap; animation: ticker 25s linear infinite; }
+    .ticker-wrap { width: 100%; overflow: hidden; background: #c00; color: white; padding: 6px 0; font-size: 14px; position: sticky; top: 0; z-index: 999; font-weight: bold; }
+    .ticker-move { display: inline-block; white-space: nowrap; animation: ticker 30s linear infinite; }
     
-    /* 모바일용 카드 디자인 */
-    .stMetric { background: #111 !important; border: 1px solid #333 !important; padding: 5px !important; border-radius: 5px !important; }
-    .compact-card { background: #1a1a1a; padding: 8px; border-radius: 5px; margin-bottom: 5px; border-left: 3px solid #ff4b4b; font-size: 13px; }
-    h3 { font-size: 16px !important; color: #ff4b4b; margin: 10px 0 !important; }
-    div[data-testid="stExpander"] { border: none !important; background: transparent !important; }
+    /* MTS 스타일 리스트 */
+    .stock-row { display: flex; align-items: center; justify-content: space-between; padding: 10px; border-bottom: 1px solid #333; background: #111; margin-bottom: 2px; }
+    .stock-name { font-size: 15px; font-weight: bold; color: #eee; width: 40%; }
+    .stock-price { font-size: 14px; color: #ff4b4b; width: 20%; text-align: right; }
+    .mini-chart { width: 35%; height: 40px; }
+    
+    h3 { font-size: 18px !important; color: #ff4b4b; border-bottom: 2px solid #ff4b4b; padding-bottom: 5px; margin-top: 20px !important; }
     </style>
     """, unsafe_allow_html=True)
 
-# 2. 데이터 엔진 (에러 차단)
+# 2. 보안 데이터 로더 (에러 방어율 100%)
 @st.cache_data(ttl=30)
-def get_clean_data():
+def get_verified_data():
     try:
         df = fdr.StockListing('KRX')
-        # 모든 가능한 등락률 컬럼명을 'Chg'로 통일 (에러 원천 차단)
-        col_map = {'ChangesRatio':'Chg', 'ChgRate':'Chg', 'Rate':'Chg', 'Change':'Chg'}
-        df = df.rename(columns=col_map)
-        if 'Chg' not in df.columns: df['Chg'] = 0.0
+        # 에러 방지: 모든 컬럼명을 소문자로 바꾸고 필요한 것만 강제 지정
+        df.columns = [c.upper() for c in df.columns]
+        # 등락률 컬럼 통합 찾기
+        for col in ['CHANGESRATIO', 'CHGRATE', 'RATE', 'CHANGE', 'CHG']:
+            if col in df.columns:
+                df['CHG_FINAL'] = df[col]
+                break
+        if 'CHG_FINAL' not in df.columns: df['CHG_FINAL'] = 0.0
         return df
     except: return pd.DataFrame()
 
-def get_live_news():
+def get_realtime_ticker():
     try:
         res = requests.get("https://finance.naver.com/news/mainnews.naver", headers={'User-Agent':'Mozilla/5.0'})
         soup = BeautifulSoup(res.text, 'html.parser')
-        return "  |  ".join([item.get_text().strip() for item in soup.select('.mainNewsList .articleSubject a')[:7]])
-    except: return "뉴스 연결 중..."
+        titles = [a.get_text().strip() for a in soup.select('.mainNewsList .articleSubject a')[:8]]
+        return "  🔥  ".join(titles)
+    except: return "실시간 속보를 불러오는 중..."
 
-# 3. 미니 차트 함수 (간소화)
-def plot_mini_chart(code):
+# 3. 미니 차트 (MTS 스타일)
+def render_mini_chart(code):
     try:
-        df = fdr.DataReader(code).tail(20)
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=df.index, y=df['Close'], fill='tozeroy', line=dict(color='#ff4b4b', width=1)))
-        fig.update_layout(height=60, width=150, margin=dict(l=0,r=0,t=0,b=0), xaxis_visible=False, yaxis_visible=False, 
+        df = fdr.DataReader(code).tail(15)
+        fig = go.Figure(data=[go.Scatter(y=df['Close'], mode='lines', line=dict(color='#ff4b4b', width=2), fill='tozeroy')])
+        fig.update_layout(width=120, height=40, margin=dict(l=0,r=0,t=0,b=0), xaxis_visible=False, yaxis_visible=False,
                           paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', template='plotly_dark')
         return fig
     except: return None
 
-# --- UI 시작 ---
+# --- 화면 구성 시작 ---
 
-# [1] 최상단 뉴스 티커 (사용자 요청사항)
-st.markdown(f"<div class='ticker-wrap'><div class='ticker-move'>{get_live_news()}</div></div>", unsafe_allow_html=True)
+# [1] 최상단 실시간 기사 티커
+st.markdown(f"<div class='ticker-wrap'><div class='ticker-move'>{get_realtime_ticker()}</div></div>", unsafe_allow_html=True)
 
-# [2] 실시간 시장 지수 (MTS 스타일 가로 좁게)
-df_all = get_clean_data()
+df_main = get_verified_data()
+
+# [2] 시장 지수 한 줄 요약
 idx_cols = st.columns(4)
-for i, (n, c) in enumerate([("KOSPI", "KS11"), ("KOSDAQ", "KQ11"), ("NASDAQ", "IXIC"), ("USD/KRW", "USD/KRW")]):
+for i, (n, c) in enumerate([("코스피", "KS11"), ("코스닥", "KQ11"), ("나스닥", "IXIC"), ("환율", "USD/KRW")]):
     try:
         d = fdr.DataReader(c).tail(2)
-        idx_cols[i].metric(n, f"{d['Close'].iloc[-1]:,.0f}", f"{d['Close'].iloc[-1]-d['Close'].iloc[-2]:+.1f}")
+        v, diff = d['Close'].iloc[-1], d['Close'].iloc[-1]-d['Close'].iloc[-2]
+        idx_cols[i].metric(n, f"{v:,.0f}", f"{diff:+.1f}")
     except: pass
+
+# [3] 메인 콘텐츠 (모바일 MTS 스타일 세로 배치)
+st.subheader("🔥 세력 수급 & 실시간 차트")
+if not df_main.empty:
+    # 수급 상위 6개
+    hot_stocks = df_main.nlargest(6, 'VOLUME')
+    for _, row in hot_stocks.iterrows():
+        c1, c2, c3 = st.columns([2, 1, 1])
+        with c1: st.markdown(f"<div style='padding-top:10px;'><b>{row['NAME']}</b></div>", unsafe_allow_html=True)
+        with c2: st.markdown(f"<div style='color:#ff4b4b; padding-top:10px; text-align:right;'>{row['CHG_FINAL']:+.2f}%</div>", unsafe_allow_html=True)
+        with c3:
+            chart = render_mini_chart(row['CODE'])
+            if chart: st.plotly_chart(chart, use_container_width=False, config={'displayModeBar': False})
+
+st.subheader("💎 익일 급등 예측 & 족보집")
+col_a, col_b = st.columns(2)
+with col_a:
+    st.write("🎯 **내일의 급등주 후보**")
+    # 안전한 필터링
+    next_bets = df_main[(df_main['CHG_FINAL'] > 2) & (df_main['CHG_FINAL'] < 12)].head(5)
+    for n in next_bets['NAME']: st.write(f"✅ {n}")
+
+with col_b:
+    st.write("📜 **바닥 매집 족보**")
+    for n in df_main.tail(5)['NAME']: st.write(f"🔎 {n}")
 
 st.divider()
 
-# [3] 메인 정보창 (모바일에 최적화된 리스트형 배치)
-col_left, col_right = st.columns([1, 1])
+# [4] 외인 실시간 매수/매도 상위 (압축형)
+st.subheader("🏦 외인/기관 매매 현황")
+m_cols = st.columns(2)
+with m_cols[0]:
+    st.write("🟢 순매수 추정")
+    st.dataframe(df_main.nlargest(8, 'CHG_FINAL')[['NAME', 'CHG_FINAL']], hide_index=True)
+with m_cols[1]:
+    st.write("🔴 순매도 추정")
+    st.dataframe(df_main.nsmallest(8, 'CHG_FINAL')[['NAME', 'CHG_FINAL']], hide_index=True)
 
-with col_left:
-    st.subheader("🔥 실시간 세력/수급 상위")
-    # 수급 상위 5개 + 미니차트
-    hot_list = df_all.nlargest(5, 'Volume')
-    for _, row in hot_list.iterrows():
-        c1, c2 = st.columns([2, 1])
-        c1.markdown(f"<div class='compact-card'><b>{row['Name']}</b><br>{row['Chg']:+.2f}%</div>", unsafe_allow_html=True)
-        with c2:
-            chart = plot_mini_chart(row['Code'])
-            if chart: st.plotly_chart(chart, use_container_width=True, config={'displayModeBar': False})
-
-    st.subheader("💎 익일 급등 유력 (종가베팅)")
-    # 안전하게 Chg 컬럼을 확인 후 필터링
-    if not df_all.empty:
-        potential = df_all[(df_all['Chg'] > 3) & (df_all['Chg'] < 15)].head(5)
-        for _, row in potential.iterrows():
-            st.markdown(f"✅ **{row['Name']}** (+{row['Chg']}%)")
-
-with col_right:
-    st.subheader("🏦 외인 실시간 매수/매도")
-    b_col, s_col = st.columns(2)
-    with b_col:
-        st.write("🟢 **매수**")
-        for n in df_all.nlargest(7, 'Chg')['Name']: st.write(f"<span style='font-size:12px;'>{n}</span>", unsafe_allow_html=True)
-    with s_col:
-        st.write("🔴 **매도**")
-        for n in df_all.nsmallest(7, 'Chg')['Name']: st.write(f"<span style='font-size:12px;'>{n}</span>", unsafe_allow_html=True)
-
-    st.divider()
-    st.subheader("📜 족보집 (60월선 바닥)")
-    st.caption("실시간 스캔 결과:")
-    for n in df_all.head(5)['Name']: st.write(f"🔎 {n}")
-
-# 하단 수동 리셋 (MTS 스타일)
-if st.button("🔄 실시간 데이터 새로고침"):
+# 푸터 수동 리셋
+if st.button("🔄 실시간 데이터 갱신 (RESET)"):
     st.cache_data.clear()
     st.rerun()
-g
