@@ -715,6 +715,267 @@ def render_spark(code: str):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 바닥매집주 족보 분석 (PDF: 60월선 + 박스권 매집)
+# ═══════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=600)
+def load_monthly_ohlcv(code: str, months: int = 120):
+    """월봉 데이터 + 60월선 계산"""
+    try:
+        end   = datetime.today()
+        start = end - timedelta(days=months * 31 + 90)
+        df    = fdr.DataReader(code, start, end)
+        if df is None or df.empty:
+            return None
+        df_m             = df['Close'].resample('ME').last().to_frame()
+        df_m['High']     = df['High'].resample('ME').max()
+        df_m['Low']      = df['Low'].resample('ME').min()
+        df_m['Open']     = df['Open'].resample('ME').first()
+        df_m['Volume']   = df['Volume'].resample('ME').sum()
+        df_m['MA60']     = df_m['Close'].rolling(60).mean()   # 60월선 (5년)
+        df_m['MA12']     = df_m['Close'].rolling(12).mean()   # 12월선 (1년)
+        return df_m.dropna(subset=['Close']).tail(months)
+    except:
+        return None
+
+
+def analyze_jokbo(df_all: pd.DataFrame) -> pd.DataFrame:
+    """
+    바닥매집주 족보 탐지 (승관쌤 PDF 기법):
+    ① 현재가가 60월선 아래 or 10% 이내 (저평가 구간)
+    ② 최근 120일 박스권 형성 (고저 40% 이내)
+    ③ 박스 하단 30% 이내 위치 (매수 타점)
+    ④ 거래량 감소 (세력 조용히 매집 중)
+    ⑤ 월봉 바닥 2회 이상 반복 지지
+    ⑥ 12개월 횡보 (±30% 이내)
+    """
+    if df_all.empty:
+        return pd.DataFrame()
+    results = []
+    pool = df_all[
+        (df_all['PRICE_FINAL'] >= 500) &
+        (df_all['VOLUME'] > 1000) &
+        (df_all['CHG_FINAL'].between(-8, 8))
+    ].head(200)
+
+    for _, row in pool.iterrows():
+        try:
+            code = str(row.get('CODE', ''))
+            if not code:
+                continue
+            df_m = load_monthly_ohlcv(code, 120)
+            df_d = load_ohlcv(code, 180)
+            if df_m is None or len(df_m) < 24 or df_d is None or len(df_d) < 60:
+                continue
+
+            close  = float(df_d['Close'].iloc[-1])
+            ma60_m = float(df_m['MA60'].iloc[-1]) if not pd.isna(df_m['MA60'].iloc[-1]) else None
+            if ma60_m is None or ma60_m == 0:
+                continue
+
+            # ① 60월선 대비 위치
+            pos60      = (close - ma60_m) / ma60_m * 100
+            below_ma60 = pos60 <= 10
+
+            # ② 박스권 범위
+            r120      = df_d.tail(120)
+            box_high  = float(r120['High'].max())
+            box_low   = float(r120['Low'].min())
+            if box_low == 0:
+                continue
+            box_range = (box_high - box_low) / box_low * 100
+            is_box    = box_range <= 40
+
+            # ③ 박스 하단 근접
+            box_pos  = (close - box_low) / (box_high - box_low) * 100 if box_high != box_low else 50
+            near_bot = box_pos <= 30
+
+            # ④ 거래량 감소
+            vol_r     = float(df_d['VOL_R'].iloc[-1]) if not pd.isna(df_d['VOL_R'].iloc[-1]) else 1.0
+            quiet_vol = 0.1 <= vol_r <= 1.2
+
+            # ⑤ 월봉 바닥 반복 지지
+            low_zone   = box_low * 1.15
+            touch_cnt  = int((df_m.tail(24)['Low'] <= low_zone).sum())
+            multi_touch= touch_cnt >= 2
+
+            # ⑥ 12개월 횡보
+            chg_12m  = (close - float(df_m['Close'].iloc[-12])) / float(df_m['Close'].iloc[-12]) * 100 \
+                       if len(df_m) >= 12 else 0
+            sideways = abs(chg_12m) <= 30
+
+            score = sum([below_ma60, is_box, near_bot, quiet_vol, multi_touch, sideways])
+            if score >= 3:
+                results.append({
+                    'NAME':       row.get('NAME', ''),
+                    'CODE':       code,
+                    'PRICE':      close,
+                    'CHG':        row['CHG_FINAL'],
+                    '60월선위치': f"{pos60:+.1f}%",
+                    '박스권범위': f"{box_range:.0f}%",
+                    '하단위치':   f"{box_pos:.0f}%",
+                    '거래량비율': f"{vol_r:.1f}x",
+                    '바닥터치':   f"{touch_cnt}회",
+                    '점수':       score,
+                })
+        except:
+            continue
+
+    if not results:
+        return pd.DataFrame()
+    return pd.DataFrame(results).sort_values('점수', ascending=False).head(15)
+
+
+def render_jokbo_chart(code: str, name: str):
+    """
+    족보 전용 차트
+    ─ 상단: 월봉 캔들 + 60월선(굵은 흰선) + 12월선 + 바닥 지지선
+    ─ 중단: 일봉 캔들 + MA5/20/60 + 박스권 상하단선
+    ─ 하단: 거래량 + VOL MA5
+    """
+    df_m = load_monthly_ohlcv(code, 120)
+    df_d = load_ohlcv(code, 360)
+    if df_m is None or df_d is None:
+        st.warning(f"차트 데이터 없음: {code}")
+        return
+
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=False,
+        vertical_spacing=0.05,
+        row_heights=[0.38, 0.38, 0.24],
+        subplot_titles=[
+            "📅 월봉 — 60월선 기준 (저평가 확인)",
+            "📊 일봉 — 박스권 매수 타점",
+            "📊 거래량",
+        ]
+    )
+    AXIS = dict(gridcolor='#1e2636', zeroline=False, showline=False, color='#4a6080')
+
+    # ── 월봉 캔들 ──
+    fig.add_trace(go.Candlestick(
+        x=df_m.index, open=df_m['Open'], high=df_m['High'],
+        low=df_m['Low'], close=df_m['Close'],
+        increasing=dict(line=dict(color='#ff2d2d'), fillcolor='#ff2d2d'),
+        decreasing=dict(line=dict(color='#1a8cff'), fillcolor='#1a8cff'),
+        name='월봉', showlegend=False,
+    ), row=1, col=1)
+
+    # 60월선 ─ 굵은 흰선 (PDF 핵심 기준선)
+    if 'MA60' in df_m.columns:
+        fig.add_trace(go.Scatter(
+            x=df_m.index, y=df_m['MA60'],
+            line=dict(color='#e0e6f0', width=3),
+            name='60월선',
+        ), row=1, col=1)
+
+    # 12월선
+    if 'MA12' in df_m.columns:
+        fig.add_trace(go.Scatter(
+            x=df_m.index, y=df_m['MA12'],
+            line=dict(color='#ffb400', width=1.5, dash='dot'),
+            name='12월선', opacity=0.85,
+        ), row=1, col=1)
+
+    # 박스 하단 지지선 (월봉)
+    box_low  = float(df_d.tail(120)['Low'].min())
+    box_high = float(df_d.tail(120)['High'].max())
+    fig.add_hline(y=box_low,
+                  line=dict(color='#ff2d2d', width=1.5, dash='dot'),
+                  annotation_text="바닥 지지",
+                  annotation_font_color='#ff2d2d',
+                  row=1, col=1)
+
+    # ── 일봉 캔들 ──
+    df_show = df_d.tail(240)
+    fig.add_trace(go.Candlestick(
+        x=df_show.index, open=df_show['Open'], high=df_show['High'],
+        low=df_show['Low'], close=df_show['Close'],
+        increasing=dict(line=dict(color='#ff2d2d'), fillcolor='#ff2d2d'),
+        decreasing=dict(line=dict(color='#1a8cff'), fillcolor='#1a8cff'),
+        name='일봉', showlegend=False,
+    ), row=2, col=1)
+
+    for col_, color_, nm_ in [('MA5','#ffcc00','MA5'),('MA20','#00d46a','MA20'),('MA60','#c084fc','MA60')]:
+        if col_ in df_show.columns:
+            fig.add_trace(go.Scatter(
+                x=df_show.index, y=df_show[col_],
+                line=dict(color=color_, width=1.2),
+                name=nm_, opacity=0.9,
+            ), row=2, col=1)
+
+    # 박스권 상하단선 (일봉)
+    for y_, lbl_, clr_ in [
+        (box_high, '박스 상단 (분할매도)', '#ffb400'),
+        (box_low,  '박스 하단 (매수타점)', '#ff2d2d'),
+    ]:
+        fig.add_hline(y=y_,
+                      line=dict(color=clr_, width=1.5, dash='dot'),
+                      annotation_text=lbl_,
+                      annotation_font_color=clr_,
+                      annotation_position='right',
+                      row=2, col=1)
+
+    # ── 거래량 ──
+    vol_colors = ['#ff2d2d' if c >= o else '#1a8cff'
+                  for c, o in zip(df_show['Close'], df_show['Open'])]
+    fig.add_trace(go.Bar(
+        x=df_show.index, y=df_show['Volume'],
+        marker_color=vol_colors, opacity=0.65,
+        name='거래량', showlegend=False,
+    ), row=3, col=1)
+    if 'VOL_MA5' in df_show.columns:
+        fig.add_trace(go.Scatter(
+            x=df_show.index, y=df_show['VOL_MA5'],
+            line=dict(color='#ffcc00', width=1),
+            name='VOL MA5',
+        ), row=3, col=1)
+
+    fig.update_layout(
+        paper_bgcolor='#0d1118', plot_bgcolor='#0d1118',
+        font=dict(family='JetBrains Mono', color='#4a6080', size=10),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1,
+                    bgcolor='rgba(0,0,0,0)', font=dict(size=10, color='#dce6f5')),
+        margin=dict(l=8, r=8, t=60, b=8),
+        height=840,
+        xaxis_rangeslider_visible=False,
+        xaxis2_rangeslider_visible=False,
+    )
+    for ax in ['xaxis','yaxis','xaxis2','yaxis2','xaxis3','yaxis3']:
+        fig.update_layout(**{ax: AXIS})
+    fig.update_yaxes(tickformat=',.0f')
+    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+
+    # ── 분석 요약 ──
+    ma60_now  = float(df_m['MA60'].iloc[-1]) if not pd.isna(df_m['MA60'].iloc[-1]) else 0
+    close_now = float(df_d['Close'].iloc[-1])
+    pos60     = (close_now - ma60_now) / ma60_now * 100 if ma60_now else 0
+    box_pos   = (close_now - box_low) / (box_high - box_low) * 100 if box_high != box_low else 50
+    verdict   = "🟢 저평가 매집 구간" if pos60 <= 0 else \
+                ("🟡 60월선 근접 — 관찰" if pos60 <= 15 else "🔵 60월선 위 — 상승 추세")
+
+    st.markdown(f"""
+    <div style='background:var(--bg2);border:1px solid var(--border);
+                border-left:3px solid #00d46a;border-radius:0 10px 10px 0;
+                padding:14px 18px;margin-top:12px;'>
+      <div style='font-size:13px;font-weight:900;color:#00d46a;margin-bottom:8px;'>
+        📋 족보 분석 요약
+      </div>
+      <div style='font-size:12px;color:#6a8090;line-height:2.2;'>
+        ▶ 60월선 대비: <b style='color:#dce6f5;'>{pos60:+.1f}%</b> &nbsp;{verdict}<br>
+        ▶ 박스권: <b style='color:#dce6f5;'>{box_low:,.0f}원 ~ {box_high:,.0f}원</b>
+           &nbsp;(범위 {(box_high-box_low)/box_low*100:.0f}%)<br>
+        ▶ 박스 내 위치: <b style='color:#dce6f5;'>하단에서 {box_pos:.0f}%</b><br>
+        ▶ 매수 타점: <b style='color:#ff2d2d;'>
+           박스 하단 ({box_low:,.0f}원) 근처 일봉 양봉 + 거래량 폭증 시</b><br>
+        ▶ 분할매도: <b style='color:#ffb400;'>
+           박스 상단 ({box_high:,.0f}원) 돌파 후 60월선 부근</b>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════════════════════════
 # 메인
 # ═══════════════════════════════════════════════════════════════════
 
@@ -799,6 +1060,7 @@ def main():
         "💥 거래량 폭증",
         "🌙 익일 급등 예측",
         "🏦 외인/기관 수급",
+        "📊 바닥매집주 족보",
     ])
 
     # ══════════════════════════════════════════════════════════════
@@ -1129,6 +1391,94 @@ def main():
                       <div class='flow-val c-down'>{chg:+.1f}%</div>
                     </div>
                     """, unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════════════════════
+    # TAB 6: 바닥매집주 족보
+    # ══════════════════════════════════════════════════════════════
+    with tabs[5]:
+        st.markdown("<div class='sec-title'>📊 <b>바닥매집주 족보</b> — 60월선 + 박스권 매집 탐지</div>",
+                    unsafe_allow_html=True)
+        st.markdown("""
+        <div class='desc-box' style='border-left-color:#00d46a;'>
+          <div class='db-title'>🎯 세력은 바닥에서 조용히 산다</div>
+          <div class='db-body'>
+            <b>60월선(5년 이동평균)</b> 아래 = 역사적 저평가 구간.<br>
+            세력은 이 구간에서 주가를 박스권에 가두고 물량을 모읍니다.<br>
+            월봉 바닥 반복 지지 + 일봉 박스권 하단 = 매집 완료 신호.
+          </div>
+          <div class='db-tags'>
+            <span class='badge b-green'>60월선 아래 = 저평가</span>
+            <span class='badge b-green'>박스권 40% 이내</span>
+            <span class='badge b-green'>박스 하단 지지 반복</span>
+            <span class='badge b-green'>거래량 감소 (세력 대기)</span>
+            <span class='badge b-green'>일봉 매수타점 확인</span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # 종목 직접 검색
+        c_inp, c_btn = st.columns([3, 1])
+        with c_inp:
+            search_code = st.text_input("종목코드 직접 분석",
+                placeholder="예: 039610  (화성밸브)  /  006340  (대원전선)",
+                label_visibility="collapsed")
+        with c_btn:
+            do_search = st.button("🔍 족보 분석", use_container_width=True)
+
+        if do_search and search_code.strip():
+            scode = search_code.strip().zfill(6)
+            sname_row = df[df['CODE'].astype(str).str.zfill(6) == scode] if 'CODE' in df.columns else pd.DataFrame()
+            sname = sname_row['NAME'].iloc[0] if not sname_row.empty else scode
+            st.markdown(
+                f"<div style='font-size:14px;font-weight:900;color:#00d46a;margin:12px 0;'>"
+                f"🔍 {sname} ({scode}) 족보 분석</div>",
+                unsafe_allow_html=True)
+            render_jokbo_chart(scode, sname)
+
+        # AI 자동 탐지
+        st.markdown("<div class='sec-title' style='margin-top:24px;'>🤖 <b>AI 자동 탐지</b> — 바닥매집 패턴</div>",
+                    unsafe_allow_html=True)
+
+        with st.spinner("바닥매집주 탐색 중... (60월선 + 박스권 분석, 1~2분 소요)"):
+            df_jokbo = analyze_jokbo(df)
+
+        if df_jokbo.empty:
+            st.info("현재 바닥매집 패턴 조건에 맞는 종목이 없습니다.")
+        else:
+            for i, (_, r) in enumerate(df_jokbo.iterrows()):
+                score  = int(r.get('점수', 0))
+                chg    = float(r.get('CHG', 0))
+                cls    = 'c-up' if chg >= 0 else 'c-down'
+                stars  = '⭐' * score
+                bcls   = 'b-green' if score >= 5 else ('b-gold' if score >= 4 else 'b-muted')
+
+                ca, cb, cc, cd, ce, cf = st.columns([3, 1, 1, 1, 1, 1])
+                with ca:
+                    st.markdown(f"""
+                    <div class='s-card'>
+                      <div class='sc-row1'>
+                        <div>
+                          <div class='sc-name'>{r['NAME']}
+                            <span class='badge {bcls}'>{stars} 매집</span>
+                          </div>
+                          <div class='sc-code'>{r['CODE']}</div>
+                        </div>
+                        <div>
+                          <div class='sc-price'>{float(r['PRICE']):,.0f}</div>
+                          <div class='sc-chg {cls}'>{chg:+.2f}%</div>
+                        </div>
+                      </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with cb: st.metric("60월선", r.get('60월선위치','-'))
+                with cc: st.metric("박스범위", r.get('박스권범위','-'))
+                with cd: st.metric("하단위치", r.get('하단위치','-'))
+                with ce: st.metric("바닥터치", r.get('바닥터치','-'))
+                with cf:
+                    if st.button("차트", key=f"jb_{i}"):
+                        st.session_state.sel_code = r['CODE']
+                        st.session_state.sel_name = r['NAME']
+                        st.rerun()
 
     # ── 하단 갱신 ──────────────────────────────────────────────────
     st.markdown("<hr/>", unsafe_allow_html=True)
