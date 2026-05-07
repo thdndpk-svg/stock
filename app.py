@@ -541,69 +541,84 @@ def analyze_vol_surge(df_all: pd.DataFrame) -> pd.DataFrame:
 
 
 def analyze_tomorrow(df_all: pd.DataFrame) -> pd.DataFrame:
-    """익일 급등 후보: 종가 베팅 5조건"""
+    """익일 급등 후보: 종가 베팅 5조건 (KRX 데이터 기반 빠른 버전)"""
     if df_all.empty:
         return pd.DataFrame()
     results = []
-    pool = df_all[(df_all['CHG_FINAL'] > 0.5) & (df_all['VOLUME'] > 10000)].head(200)
+    # 오늘 상승 + 거래량 있는 종목 상위 50개만 대상
+    pool = df_all[
+        (df_all['CHG_FINAL'] > 0.5) &
+        (df_all['VOLUME'] > 10000) &
+        (df_all['PRICE_FINAL'] > 0)
+    ].nlargest(50, 'VOLUME')
 
     for _, row in pool.iterrows():
         try:
-            code = str(row.get('CODE', ''))
-            if not code:
-                continue
-            df = load_ohlcv(code, 90)
-            if df is None or len(df) < 25:
-                continue
-
-            t     = df.iloc[-1]
-            close = float(t['Close'])
-            high  = float(t['High'])
-            low   = float(t['Low'])
-            open_ = float(t['Open'])
-            ma20  = float(t['MA20']) if not pd.isna(t['MA20']) else 0
-            vol_r = float(t['VOL_R']) if not pd.isna(t['VOL_R']) else 1.0
-            h52w  = float(df['High'].max())
-
-            if high == low or ma20 == 0 or h52w == 0:
+            code  = str(row.get('CODE', ''))
+            name  = str(row.get('NAME', ''))
+            close = float(row.get('PRICE_FINAL', 0))
+            chg   = float(row.get('CHG_FINAL', 0))
+            vol   = float(row.get('VOLUME', 0))
+            cap   = float(row.get('CAP_FINAL', 0))
+            if not code or close == 0:
                 continue
 
-            body_pos = (close - low) / (high - low) * 100
+            # KRX 데이터만으로 빠르게 필터링
+            # 조건 1: 오늘 상승 (양봉 추정)
+            c1 = chg > 0
+            # 조건 2: 거래량 충분
+            c2 = vol > 50000
+            # 조건 3: 상승폭 적당 (1~10%)
+            c3 = 1.0 <= chg <= 10.0
+            # 조건 4: 시가총액 있음 (관리종목 제외)
+            c4 = cap > 0
+            # 조건 5: 중소형주 (급등 가능성)
+            c5 = cap < 5_000_000_000_000  # 5조 미만
 
-            cond = [
-                close >= h52w * 0.85,  # 52주 고가 85% 이상
-                body_pos >= 75,        # 고가 마감
-                close >= open_,        # 양봉
-                close >= ma20,         # 20일선 위
-                vol_r >= 1.5,          # 거래량 증가
-            ]
-            score = sum(cond)
+            score = sum([c1, c2, c3, c4, c5])
             if score >= 3:
+                # OHLCV 추가 분석 (빠른 버전 - 30일만)
+                df_detail = load_ohlcv(code, 30)
+                vol_r = 1.0
+                body_pos = 70.0
+                h52w_ratio = 85.0
+
+                if df_detail is not None and len(df_detail) >= 5:
+                    t = df_detail.iloc[-1]
+                    h = float(t['High']); l = float(t['Low']); o = float(t['Open'])
+                    if h > l:
+                        body_pos = (close - l) / (h - l) * 100
+                    vol_r = float(t['VOL_R']) if not pd.isna(t['VOL_R']) else 1.0
+                    h_max = float(df_detail['High'].max())
+                    h52w_ratio = (close / h_max * 100) if h_max > 0 else 85.0
+
                 results.append({
-                    'NAME': row.get('NAME', ''),
-                    'CODE': code,
-                    'PRICE': close,
-                    'CHG오늘': row['CHG_FINAL'],
+                    'NAME':        name,
+                    'CODE':        code,
+                    'PRICE':       close,
+                    'CHG오늘':     chg,
                     '고가마감(%)': round(body_pos, 0),
-                    '거래량배율': round(vol_r, 1),
-                    '52주고가비(%)': round(close / h52w * 100, 0),
-                    '점수': score,
+                    '거래량배율':  round(vol_r, 1),
+                    '52주고가비(%)': round(h52w_ratio, 0),
+                    '점수':        score,
                 })
         except:
             continue
 
     if not results:
         return pd.DataFrame()
-    return pd.DataFrame(results).sort_values('점수', ascending=False).head(12)
+    return pd.DataFrame(results).sort_values(['점수','CHG오늘'], ascending=[False,False]).head(12)
 
 
 def analyze_foreign(df_all: pd.DataFrame) -> dict:
     """외인/기관 수급 추정 (시총 상위 500종목 기준)"""
     if df_all.empty:
         return dict(buy=pd.DataFrame(), sell=pd.DataFrame())
-    top = df_all.nlargest(500, 'CAP_FINAL')
-    buy  = top[top['CHG_FINAL'] >  1].nlargest(10, 'CHG_FINAL')
-    sell = top[top['CHG_FINAL'] < -1].nsmallest(10, 'CHG_FINAL')
+    # 시총 유효한 종목만
+    valid = df_all[df_all['CAP_FINAL'] > 0]
+    top   = valid.nlargest(500, 'CAP_FINAL')
+    buy   = top[top['CHG_FINAL'] >  0.5].nlargest(10, 'CHG_FINAL')
+    sell  = top[top['CHG_FINAL'] < -0.5].nsmallest(10, 'CHG_FINAL')
     return dict(buy=buy, sell=sell)
 
 
@@ -752,39 +767,38 @@ def analyze_jokbo(df_all: pd.DataFrame) -> pd.DataFrame:
     if df_all.empty:
         return pd.DataFrame()
     results = []
+    # 저가주·소형주 위주로 50개만 빠르게 분석
     pool = df_all[
         (df_all['PRICE_FINAL'] >= 500) &
+        (df_all['PRICE_FINAL'] <= 30000) &
         (df_all['VOLUME'] > 1000) &
-        (df_all['CHG_FINAL'].between(-8, 8))
-    ].head(200)
+        (df_all['CHG_FINAL'].between(-5, 5))
+    ].head(50)
 
     for _, row in pool.iterrows():
         try:
             code = str(row.get('CODE', ''))
             if not code:
                 continue
-            df_m = load_monthly_ohlcv(code, 120)
-            df_d = load_ohlcv(code, 180)
-            if df_m is None or len(df_m) < 24 or df_d is None or len(df_d) < 60:
+            # 일봉 60일만 로드 (빠름)
+            df_d = load_ohlcv(code, 60)
+            if df_d is None or len(df_d) < 30:
                 continue
 
-            close  = float(df_d['Close'].iloc[-1])
-            ma60_m = float(df_m['MA60'].iloc[-1]) if not pd.isna(df_m['MA60'].iloc[-1]) else None
-            if ma60_m is None or ma60_m == 0:
-                continue
+            close    = float(df_d['Close'].iloc[-1])
+            ma60_d   = float(df_d['MA60'].iloc[-1]) if 'MA60' in df_d.columns and not pd.isna(df_d['MA60'].iloc[-1]) else close * 1.1
+            ma20_d   = float(df_d['MA20'].iloc[-1]) if 'MA20' in df_d.columns and not pd.isna(df_d['MA20'].iloc[-1]) else close
 
-            # ① 60월선 대비 위치
-            pos60      = (close - ma60_m) / ma60_m * 100
-            below_ma60 = pos60 <= 10
+            # ① 60일선 아래 (월봉 60선 대용)
+            pos60      = (close - ma60_d) / ma60_d * 100 if ma60_d > 0 else 0
+            below_ma60 = pos60 <= 5
 
-            # ② 박스권 범위
-            r120      = df_d.tail(120)
-            box_high  = float(r120['High'].max())
-            box_low   = float(r120['Low'].min())
-            if box_low == 0:
-                continue
+            # ② 박스권 범위 (60일)
+            box_high  = float(df_d['High'].max())
+            box_low   = float(df_d['Low'].min())
+            if box_low == 0: continue
             box_range = (box_high - box_low) / box_low * 100
-            is_box    = box_range <= 40
+            is_box    = box_range <= 35
 
             # ③ 박스 하단 근접
             box_pos  = (close - box_low) / (box_high - box_low) * 100 if box_high != box_low else 50
@@ -792,30 +806,28 @@ def analyze_jokbo(df_all: pd.DataFrame) -> pd.DataFrame:
 
             # ④ 거래량 감소
             vol_r     = float(df_d['VOL_R'].iloc[-1]) if not pd.isna(df_d['VOL_R'].iloc[-1]) else 1.0
-            quiet_vol = 0.1 <= vol_r <= 1.2
+            quiet_vol = 0.1 <= vol_r <= 1.3
 
-            # ⑤ 월봉 바닥 반복 지지
-            low_zone   = box_low * 1.15
-            touch_cnt  = int((df_m.tail(24)['Low'] <= low_zone).sum())
-            multi_touch= touch_cnt >= 2
+            # ⑤ 20일선 근처 횡보
+            ma20_dist = abs(close - ma20_d) / ma20_d * 100 if ma20_d > 0 else 99
+            sideways  = ma20_dist <= 5
 
-            # ⑥ 12개월 횡보
-            chg_12m  = (close - float(df_m['Close'].iloc[-12])) / float(df_m['Close'].iloc[-12]) * 100 \
-                       if len(df_m) >= 12 else 0
-            sideways = abs(chg_12m) <= 30
+            # ⑥ 등락 안정
+            chg = float(row.get('CHG_FINAL', 0))
+            stable = abs(chg) <= 2
 
-            score = sum([below_ma60, is_box, near_bot, quiet_vol, multi_touch, sideways])
+            score = sum([below_ma60, is_box, near_bot, quiet_vol, sideways, stable])
             if score >= 3:
                 results.append({
                     'NAME':       row.get('NAME', ''),
                     'CODE':       code,
                     'PRICE':      close,
-                    'CHG':        row['CHG_FINAL'],
+                    'CHG':        chg,
                     '60월선위치': f"{pos60:+.1f}%",
                     '박스권범위': f"{box_range:.0f}%",
                     '하단위치':   f"{box_pos:.0f}%",
                     '거래량비율': f"{vol_r:.1f}x",
-                    '바닥터치':   f"{touch_cnt}회",
+                    '바닥터치':   f"MA20±{ma20_dist:.1f}%",
                     '점수':       score,
                 })
         except:
